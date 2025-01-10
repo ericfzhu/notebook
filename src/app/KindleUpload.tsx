@@ -11,15 +11,13 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Upload, Merge, Replace } from "lucide-react";
-
-// Define TypeScript interfaces
-interface KindleHighlight {
-  title: string;
-  author: string;
-  highlight: string;
-  location: string;
-  timestamp: string;
-}
+import {
+  KindleHighlight,
+  getAllHighlights,
+  putHighlight,
+  clearStore,
+  getHighlightsByBookId,
+} from "./db-utils";
 
 interface UploadState {
   isUploading: boolean;
@@ -36,10 +34,10 @@ const KindleUpload = () => {
   const [showMergeDialog, setShowMergeDialog] = useState(false);
   const [newHighlights, setNewHighlights] = useState<KindleHighlight[]>([]);
 
-  // Initialize IndexedDB
+  // Initialize IndexedDB with updated schema
   useEffect(() => {
     const initDB = async () => {
-      const request = indexedDB.open("KindleHighlightsDB", 1);
+      const request = indexedDB.open("KindleHighlightsDB", 2); // Increment version for schema update
 
       request.onerror = () => {
         setUploadState((prev) => ({
@@ -50,20 +48,45 @@ const KindleUpload = () => {
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
-        if (!db.objectStoreNames.contains("highlights")) {
-          db.createObjectStore("highlights", {
-            keyPath: "id",
-            autoIncrement: true,
-          });
+
+        // Drop old store if exists
+        if (db.objectStoreNames.contains("highlights")) {
+          db.deleteObjectStore("highlights");
         }
+
+        // Create new store with compound index
+        const store = db.createObjectStore("highlights", { keyPath: "id" });
+
+        // Create indexes for efficient querying
+        store.createIndex("bookId", "bookId", { unique: false });
+        store.createIndex("bookId_location", ["bookId", "location"], {
+          unique: true,
+        });
+        store.createIndex("title", "title", { unique: false });
       };
     };
 
     initDB();
   }, []);
 
+  // Generate a stable book ID from title and author
+  const generateBookId = (title: string, author: string): string => {
+    const str = `${title.toLowerCase()}|${author.toLowerCase()}`;
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = (hash << 5) - hash + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return `book_${Math.abs(hash).toString(36)}`;
+  };
+
+  // Generate a stable highlight ID
+  const generateHighlightId = (bookId: string, location: string): string => {
+    return `highlight_${bookId}_${location.replace(/[^a-zA-Z0-9]/g, "")}`;
+  };
+
   const parseKindleFile = (content: string): KindleHighlight[] => {
-    // Basic parser for Kindle highlights
     const highlights: KindleHighlight[] = [];
     const sections = content.split("==========");
 
@@ -72,12 +95,24 @@ const KindleUpload = () => {
       if (lines.length >= 4) {
         const titleAuthorMatch = lines[0].match(/(.*?)\((.*?)\)/);
         if (titleAuthorMatch) {
+          const title = titleAuthorMatch[1].trim();
+          const author = titleAuthorMatch[2].trim();
+          const bookId = generateBookId(title, author);
+          const location = lines[1].split("|")[0].trim();
+
           highlights.push({
-            title: titleAuthorMatch[1].trim(),
-            author: titleAuthorMatch[2].trim(),
+            id: generateHighlightId(bookId, location),
+            bookId,
+            title,
+            author,
             highlight: lines[3].trim(),
-            location: lines[1].split("|")[0].trim(),
+            location,
             timestamp: lines[1].split("|")[1]?.trim() || "",
+            originalData: {
+              title,
+              author,
+            },
+            isEdited: false,
           });
         }
       }
@@ -99,14 +134,7 @@ const KindleUpload = () => {
       const parsedHighlights = parseKindleFile(content);
 
       // Check if we have existing highlights
-      const db = await openDB();
-      const transaction = db.transaction("highlights", "readonly");
-      const store = transaction.objectStore("highlights");
-      const existingHighlights = await new Promise<any[]>((resolve, reject) => {
-        const request = store.getAll();
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
+      const existingHighlights = await getAllHighlights();
 
       if (existingHighlights.length > 0) {
         setNewHighlights(parsedHighlights);
@@ -125,7 +153,7 @@ const KindleUpload = () => {
 
   const openDB = (): Promise<IDBDatabase> => {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open("KindleHighlightsDB", 1);
+      const request = indexedDB.open("KindleHighlightsDB", 2);
       request.onerror = () => reject(request.error);
       request.onsuccess = () => resolve(request.result);
     });
@@ -136,36 +164,30 @@ const KindleUpload = () => {
     mode: "merge" | "overwrite"
   ) => {
     try {
-      const db = await openDB();
-      const transaction = db.transaction("highlights", "readwrite");
-      const store = transaction.objectStore("highlights");
-
       if (mode === "overwrite") {
-        await store.clear();
+        await clearStore();
+        for (const highlight of highlights) {
+          await putHighlight(highlight);
+        }
       } else {
-        // Merge logic - get existing highlights
-        const existing = await new Promise<any[]>((resolve, reject) => {
-          const request = store.getAll();
-          request.onsuccess = () => resolve(request.result);
-          request.onerror = () => reject(request.error);
-        });
-        // Create a map of existing highlights by title for quick lookup
-        const existingMap = new Map(existing.map((h) => [h.title, h]));
+        // Merge logic
+        const existing = await getAllHighlights();
+        const existingMap = new Map(existing.map((h) => [h.id, h]));
 
-        // Filter out highlights that would be replaced
-        highlights = highlights.filter((newHighlight) => {
-          const existingHighlight = existingMap.get(newHighlight.title);
-          return (
-            !existingHighlight ||
-            new Date(newHighlight.timestamp) >
-              new Date(existingHighlight.timestamp)
-          );
-        });
-      }
+        for (const newHighlight of highlights) {
+          const existingHighlight = existingMap.get(newHighlight.id);
 
-      // Add new highlights
-      for (const highlight of highlights) {
-        await store.add(highlight);
+          if (existingHighlight?.isEdited) {
+            // Keep edited metadata but update highlight content
+            newHighlight.title = existingHighlight.title;
+            newHighlight.author = existingHighlight.author;
+            newHighlight.isEdited = true;
+            newHighlight.originalData = existingHighlight.originalData;
+          }
+
+          // Always update or add the highlight
+          await putHighlight(newHighlight);
+        }
       }
 
       setUploadState({
