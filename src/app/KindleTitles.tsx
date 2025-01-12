@@ -86,7 +86,7 @@ const KindleTitles = () => {
 
   const openDB = (): Promise<IDBDatabase> => {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open("KindleHighlightsDB", 1);
+      const request = indexedDB.open("NotebookDB", 1);
       request.onerror = () => reject(request.error);
       request.onsuccess = () => resolve(request.result);
     });

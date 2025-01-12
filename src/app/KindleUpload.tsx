@@ -37,7 +37,7 @@ const KindleUpload = () => {
   // Initialize IndexedDB with updated schema
   useEffect(() => {
     const initDB = async () => {
-      const request = indexedDB.open("KindleHighlightsDB", 2); // Increment version for schema update
+      const request = indexedDB.open("NotebookDB", 2); // Increment version for schema update
 
       request.onerror = () => {
         setUploadState((prev) => ({
