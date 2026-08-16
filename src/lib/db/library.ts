@@ -75,7 +75,6 @@ interface ClippingTagRow {
   name: string;
 }
 
-
 function mapImport(row: ImportRow): ImportSummary {
   return {
     id: row.id,
@@ -87,6 +86,26 @@ function mapImport(row: ImportRow): ImportSummary {
     conflictCount: toNumber(row.conflict_count),
     invalidCount: toNumber(row.invalid_count),
   };
+}
+
+const MAX_LIKE_PATTERN_BYTES = 50;
+
+function createLikePattern(value: string): string {
+  const encoder = new TextEncoder();
+  let escaped = "";
+  let byteLength = 2; // Opening and closing % wildcards.
+
+  for (const character of value) {
+    const next = /[\\%_]/.test(character) ? `\\${character}` : character;
+    const nextBytes = encoder.encode(next).byteLength;
+
+    if (byteLength + nextBytes > MAX_LIKE_PATTERN_BYTES) break;
+
+    escaped += next;
+    byteLength += nextBytes;
+  }
+
+  return `%${escaped}%`;
 }
 
 function mapClipping(
@@ -284,8 +303,7 @@ export async function listClippings(
         b.display_author LIKE ? ESCAPE '\\' COLLATE NOCASE
       )`,
     );
-    const escaped = query.replace(/[\\%_]/g, (character) => `\\${character}`);
-    const pattern = `%${escaped}%`;
+    const pattern = createLikePattern(query);
     values.push(pattern, pattern, pattern, pattern, pattern, pattern, pattern);
   }
 
