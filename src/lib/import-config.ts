@@ -1,0 +1,2 @@
+export const IMPORT_CHUNK_SIZE = 200;
+export const IMPORT_CHUNK_TARGET_BYTES = 900 * 1024;

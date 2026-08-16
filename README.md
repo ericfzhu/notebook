@@ -1,36 +1,133 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Notebook
 
-## Getting Started
+Notebook is a private, Cloudflare-hosted library for Kindle highlights, notes, and bookmarks. Connect a Kindle to your Mac, upload `My Clippings.txt`, and use the library to search, edit, tag, favorite, archive, and inspect each clipping.
 
-First, run the development server:
+The application uses:
+
+- Next.js App Router for the interface and API routes
+- Cloudflare Workers through the OpenNext adapter
+- Cloudflare D1 as the source of truth
+- Cloudflare Access (recommended) to keep the deployed notebook private
+
+## Import behavior
+
+Kindle stores clippings from many books in one cumulative file. Notebook therefore treats every upload as an idempotent import:
+
+- known clipping fingerprints are skipped;
+- new clippings are inserted;
+- user-edited text, personal notes, tags, favorites, and archived state are never overwritten;
+- a changed clipping at the same Kindle location is added and marked **Needs review**;
+- an identical source file is recognized and does no work.
+
+The original `.txt` file is parsed in the browser and is never sent to the Worker. Only structured clipping data and an import summary are stored in D1. Large libraries are sent in resumable batches so a first import stays within Cloudflare’s per-request D1 query limits.
+
+## Local setup
+
+### 1. Install dependencies
+
+Node.js 20 or newer is recommended.
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. Sign in to Cloudflare
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npx wrangler login
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 3. Create the D1 database
 
-## Learn More
+The repository defaults to Cloudflare's Oceania location hint, which is appropriate for an Australia-based personal deployment.
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm run db:create
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+No remote database is provisioned by this repository. Copy the `database_id` returned by Wrangler into `wrangler.jsonc`, replacing:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```text
+00000000-0000-0000-0000-000000000000
+```
 
-## Deploy on Vercel
+Generate binding types after updating the configuration:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+npm run cf-typegen
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### 4. Create a local development database
+
+```bash
+cp .dev.vars.example .dev.vars
+npm run db:migrate:local
+npm run dev
+```
+
+Open `http://localhost:3000`.
+
+### 5. Initialize production and deploy
+
+```bash
+npm run db:migrate:remote
+npm run deploy
+```
+
+Use `npm run preview` before deployment to test the production build in Cloudflare's Workers runtime.
+
+The import path deliberately parses on-device and writes batches of 200 clippings. Each batch uses a small fixed number of D1 queries, so even a large initial library does not exceed the Workers Free limit of 50 D1 queries in one invocation.
+
+## Protect the notebook
+
+Kindle clippings are personal data. Before importing real notes into the deployed Worker, put the Worker or custom domain behind **Cloudflare Access** and allow only your identity. D1 is not exposed directly to the browser; all reads and writes go through the application's route handlers, but the application still needs an access policy at its public URL.
+
+For a one-person notebook, an Access policy is simpler than maintaining registration, passwords, sessions, and account recovery inside this repository.
+
+## Finding the Kindle clipping file on macOS
+
+1. Connect the Kindle over USB.
+2. Open the mounted Kindle volume in Finder.
+3. Look in `documents/My Clippings.txt`.
+4. Drag that file into Notebook's import dialog.
+
+The exact mounted path can vary by Kindle model and macOS version, but the file itself is normally named `My Clippings.txt`.
+
+## Data model
+
+The initial migration creates:
+
+- `books` — immutable Kindle source identity plus optional display metadata;
+- `clippings` — source text, edited text, personal notes, metadata, state, and stable fingerprints;
+- `tags` and `clipping_tags` — many-to-many organization;
+- `imports` and `import_chunks` — resumable file sessions, hashes, and outcome counts.
+
+Run migrations with:
+
+```bash
+npm run db:migrate:local
+npm run db:migrate:remote
+```
+
+## Useful commands
+
+```bash
+npm run dev              # Next.js development server with local D1 bindings
+npm run typecheck        # TypeScript validation
+npm run lint             # ESLint
+npm run preview          # production build in workerd
+npm run deploy           # deploy to Cloudflare Workers
+npm run cf-typegen       # regenerate Cloudflare binding types
+```
+
+## Product design
+
+The interface is organized around the repeated reading workflow rather than around database records:
+
+- the left rail provides stable views for all clippings, favorites, review conflicts, archive, books, and tags;
+- the central column is optimized for scanning passages and personal annotations;
+- the detail panel keeps editing and source metadata available without losing the current list position;
+- mobile layouts turn the detail panel into a focused full-screen editor;
+- import results explicitly report additions, duplicates, conflicts, and parsing issues.
+
+The visual system uses a warm neutral reading surface, restrained semantic accents, generous line height, and high-contrast text. This is intentionally closer to a reading notebook than an administration dashboard.
