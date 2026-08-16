@@ -1,12 +1,16 @@
 {
   "name": "notebook",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "preview": "npm run build && npx --yes wrangler@4.68.0 dev",
+    "deploy": "npm run build && npx --yes wrangler@4.68.0 deploy",
+    "db:create": "npx --yes wrangler@4.68.0 d1 create notebook",
+    "db:migrate:local": "npx --yes wrangler@4.68.0 d1 migrations apply notebook --local",
+    "db:migrate:remote": "npx --yes wrangler@4.68.0 d1 migrations apply notebook --remote",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.4",
