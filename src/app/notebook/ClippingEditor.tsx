@@ -18,6 +18,7 @@ interface ClippingEditorProps {
   clipping: Clipping;
   onClose: () => void;
   onUpdated: (clipping: Clipping) => void;
+  onDirtyChange?: (isDirty: boolean) => void;
 }
 
 function visibleText(clipping: Clipping): string {
@@ -64,6 +65,7 @@ export function ClippingEditor({
   clipping,
   onClose,
   onUpdated,
+  onDirtyChange,
 }: ClippingEditorProps) {
   const [editedText, setEditedText] = useState(visibleText(clipping));
   const [personalNote, setPersonalNote] = useState(clipping.personalNote ?? "");
@@ -98,6 +100,25 @@ export function ClippingEditor({
     personalNote !== (clipping.personalNote ?? "") ||
     normalizedTags.join("\u0000") !== currentTagNames.join("\u0000") ||
     isFavorite !== clipping.isFavorite;
+
+  useEffect(() => {
+    onDirtyChange?.(hasChanges);
+
+    return () => onDirtyChange?.(false);
+  }, [hasChanges, onDirtyChange]);
+
+  useEffect(() => {
+    if (!hasChanges) return;
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [hasChanges]);
+
   const position = formatPosition(clipping);
   const addedAt = formatDate(clipping.sourceAddedAt);
 
