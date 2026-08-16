@@ -60,6 +60,7 @@ export function NotebookApp() {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [selectedClipping, setSelectedClipping] = useState<Clipping | null>(null);
+  const [editorDirty, setEditorDirty] = useState(false);
   const [view, setView] = useState<LibraryView>("all");
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
@@ -127,7 +128,7 @@ export function NotebookApp() {
         setHasMore(data.hasMore);
         setSelectedClipping((current) => {
           if (!current) return null;
-          return data.items.find((item) => item.id === current.id) ?? null;
+          return data.items.find((item) => item.id === current.id) ?? current;
         });
       })
       .catch((error: unknown) => {
@@ -196,7 +197,13 @@ export function NotebookApp() {
             ? "Clippings removed from your active library"
             : "Search, edit, and connect what you have read";
 
+  const canLeaveEditor = () =>
+    !editorDirty ||
+    window.confirm("Discard the changes you have not saved?");
+
   const resetScope = (nextView: LibraryView = "all") => {
+    if (!canLeaveEditor()) return;
+
     setSelectedClipping(null);
     setView(nextView);
     setSelectedBookId(null);
@@ -205,6 +212,8 @@ export function NotebookApp() {
   };
 
   const selectBook = (bookId: string) => {
+    if (!canLeaveEditor()) return;
+
     setSelectedClipping(null);
     setView("all");
     setSelectedBookId(bookId);
@@ -213,11 +222,18 @@ export function NotebookApp() {
   };
 
   const selectTag = (tagId: string) => {
+    if (!canLeaveEditor()) return;
+
     setSelectedClipping(null);
     setView("all");
     setSelectedTagId(tagId);
     setSelectedBookId(null);
     setFiltersOpen(false);
+  };
+
+  const selectClipping = (clipping: Clipping) => {
+    if (selectedClipping?.id !== clipping.id && !canLeaveEditor()) return;
+    setSelectedClipping(clipping);
   };
 
   const loadMore = async () => {
@@ -331,7 +347,7 @@ export function NotebookApp() {
             clippings={clippings}
             selectedClippingId={selectedClipping?.id ?? null}
             hasMore={hasMore}
-            onSelect={setSelectedClipping}
+            onSelect={selectClipping}
             onLoadMore={loadMore}
             onRetry={() => setReloadToken((current) => current + 1)}
             onImport={() => setImportOpen(true)}
@@ -339,12 +355,13 @@ export function NotebookApp() {
           />
         </main>
 
-        <div className="hidden xl:block">
+        <div className={selectedClipping ? "block" : "hidden xl:block"}>
           {selectedClipping ? (
             <ClippingEditor
               clipping={selectedClipping}
               onClose={() => setSelectedClipping(null)}
               onUpdated={handleUpdated}
+              onDirtyChange={setEditorDirty}
             />
           ) : (
             <div className="sticky top-[6.25rem] grid h-[calc(100vh-7.5rem)] place-items-center rounded-[1.75rem] border border-dashed border-ink/12 bg-white/35 px-8 text-center">
@@ -364,16 +381,6 @@ export function NotebookApp() {
           )}
         </div>
       </div>
-
-      {selectedClipping && (
-        <div className="xl:hidden">
-          <ClippingEditor
-            clipping={selectedClipping}
-            onClose={() => setSelectedClipping(null)}
-            onUpdated={handleUpdated}
-          />
-        </div>
-      )}
 
       <ImportDialog
         open={importOpen}
