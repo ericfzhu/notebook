@@ -1,4 +1,4 @@
-import { NotebookApp } from "@/components/notebook/NotebookApp";
+import { NotebookApp } from "./notebook/NotebookApp";
 
 export default function Home() {
   return <NotebookApp />;

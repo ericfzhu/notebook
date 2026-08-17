@@ -1,131 +1,133 @@
 # Notebook
 
-Notebook is a private, searchable home for Kindle highlights, notes, and bookmarks. Connect a Kindle to your computer, choose `documents/My Clippings.txt`, and Notebook safely adds only clippings it has not seen before.
+Notebook is a private, Cloudflare-hosted library for Kindle highlights, notes, and bookmarks. Connect a Kindle to your Mac, upload `My Clippings.txt`, and use the library to search, edit, tag, favorite, archive, and inspect each clipping.
 
-The application is designed for cumulative Kindle exports:
+The application uses:
 
-- importing the same file again creates no duplicates;
-- a later import never overwrites edited text, tags, commentary, favorites, or archive state;
-- original Kindle text and metadata remain available after display edits;
-- missing items in a later file are never interpreted as deletions.
+- Next.js App Router for the interface and API routes
+- Cloudflare Workers through the OpenNext adapter
+- Cloudflare D1 as the source of truth
+- Cloudflare Access (recommended) to keep the deployed notebook private
 
-## Architecture
+## Import behavior
 
-```text
-Next.js static export
-        │
-        ├── browser parses My Clippings.txt
-        │
-        └── /api/*
-              │
-        Cloudflare Worker
-              │
-        Cloudflare D1
-```
+Kindle stores clippings from many books in one cumulative file. Notebook therefore treats every upload as an idempotent import:
 
-The frontend remains a static Next.js application. Cloudflare serves the generated assets and runs a small Worker only for API routes. The raw Kindle file is parsed in the browser and is not retained; structured clipping text and metadata are sent to D1.
+- known clipping fingerprints are skipped;
+- new clippings are inserted;
+- user-edited text, personal notes, tags, favorites, and archived state are never overwritten;
+- a changed clipping at the same Kindle location is added and marked **Needs review**;
+- an identical source file is recognized and does no work.
 
-The Worker and static frontend are deployed together from `wrangler.jsonc`.
+The original `.txt` file is parsed in the browser and is never sent to the Worker. Only structured clipping data and an import summary are stored in D1. Large libraries are sent in resumable batches so a first import stays within Cloudflare’s per-request D1 query limits.
 
-## Product experience
+## Local setup
 
-The interface is organized around the way the library is used rather than around database tables:
+### 1. Install dependencies
 
-- persistent book navigation on desktop and a drawer on mobile;
-- one global search across clipping text, commentary, books, authors, and tags;
-- book-level reading order;
-- filters for highlights, notes, bookmarks, favorites, and archived items;
-- a contextual clipping editor for display text, commentary, tags, favorites, and archive state;
-- separate editable display metadata for book titles and authors;
-- import summaries showing added, skipped, and unparsed entries.
-
-## Local development
-
-Install dependencies:
+Node.js 20 or newer is recommended.
 
 ```bash
 npm install
 ```
 
-Create a D1 database:
+### 2. Sign in to Cloudflare
 
 ```bash
-npx wrangler@4.68.0 login
+npx wrangler login
+```
+
+### 3. Create the D1 database
+
+The repository defaults to Cloudflare's Oceania location hint, which is appropriate for an Australia-based personal deployment.
+
+```bash
 npm run db:create
 ```
 
-Wrangler prints a `database_id`. Replace the placeholder ID in `wrangler.jsonc`:
+No remote database is provisioned by this repository. Copy the `database_id` returned by Wrangler into `wrangler.jsonc`, replacing:
 
-```jsonc
-"database_id": "00000000-0000-0000-0000-000000000000"
+```text
+00000000-0000-0000-0000-000000000000
 ```
 
-Apply the schema to a local D1 database and start the combined static/Worker preview:
+Generate binding types after updating the configuration:
 
 ```bash
+npm run cf-typegen
+```
+
+### 4. Create a local development database
+
+```bash
+cp .dev.vars.example .dev.vars
 npm run db:migrate:local
-npm run preview
-```
-
-For ordinary frontend-only work, the Next.js development server is also available:
-
-```bash
 npm run dev
 ```
 
-API requests require the Wrangler preview because D1 is bound to the Worker, not to the standalone Next.js development server.
+Open `http://localhost:3000`.
 
-## Deploy to Cloudflare
-
-Apply migrations to the remote database, then deploy:
+### 5. Initialize production and deploy
 
 ```bash
 npm run db:migrate:remote
 npm run deploy
 ```
 
-The build produces a static export in `out/`. Wrangler uploads those assets and deploys `src/worker.ts` for `/api/*`.
+Use `npm run preview` before deployment to test the production build in Cloudflare's Workers runtime.
 
-### Protect the notebook
+The import path deliberately parses on-device and writes batches of 200 clippings. Each batch uses a small fixed number of D1 queries, so even a large initial library does not exceed the Workers Free limit of 50 D1 queries in one invocation.
 
-Notebook is intentionally implemented as a single-user application and does not include a public sign-up system. Put the deployed Worker behind **Cloudflare Access** before importing personal notes. Restrict access to your own email address or identity provider account.
+## Protect the notebook
 
-Do not expose the deployment publicly without an access policy: the Worker API can read and modify everything in the bound D1 database.
+Kindle clippings are personal data. Before importing real notes into the deployed Worker, put the Worker or custom domain behind **Cloudflare Access** and allow only your identity. D1 is not exposed directly to the browser; all reads and writes go through the application's route handlers, but the application still needs an access policy at its public URL.
 
-## Importing from Kindle
+For a one-person notebook, an Access policy is simpler than maintaining registration, passwords, sessions, and account recovery inside this repository.
 
-1. Connect the Kindle to the computer with USB.
-2. Open the Kindle volume and locate `documents/My Clippings.txt`.
-3. Open Notebook and choose **Import Kindle file**.
-4. Drop or select the text file.
-5. Review the local parse summary and import it.
+## Finding the Kindle clipping file on macOS
 
-`My Clippings.txt` is cumulative. Notebook generates deterministic book identities and clipping fingerprints, then relies on D1 unique constraints as the final duplicate guard. Re-importing is therefore safe and idempotent.
+1. Connect the Kindle over USB.
+2. Open the mounted Kindle volume in Finder.
+3. Look in `documents/My Clippings.txt`.
+4. Drag that file into Notebook's import dialog.
+
+The exact mounted path can vary by Kindle model and macOS version, but the file itself is normally named `My Clippings.txt`.
 
 ## Data model
 
-The first migration creates:
+The initial migration creates:
 
-- `books` — immutable source identity plus editable display title and author;
-- `clippings` — original text, optional edited text, Kindle position/date metadata, commentary, favorite state, and archive state;
-- `tags` and `clipping_tags` — reusable many-to-many tags;
-- `imports` — file name, hash, size, and import outcome counts.
+- `books` — immutable Kindle source identity plus optional display metadata;
+- `clippings` — source text, edited text, personal notes, metadata, state, and stable fingerprints;
+- `tags` and `clipping_tags` — many-to-many organization;
+- `imports` and `import_chunks` — resumable file sessions, hashes, and outcome counts.
 
-The application never stores every uploaded cumulative source file. This avoids repeatedly storing the same content and keeps D1 usage small.
-
-## Commands
+Run migrations with:
 
 ```bash
-npm run dev                # Next.js frontend development
-npm run build              # Static Next.js export
-npm run preview            # Build and run locally with Worker + D1
-npm run deploy             # Build and deploy to Cloudflare
-npm run db:create          # Create the D1 database
-npm run db:migrate:local   # Apply migrations locally
-npm run db:migrate:remote  # Apply migrations remotely
-npm run lint               # Run ESLint
+npm run db:migrate:local
+npm run db:migrate:remote
 ```
 
-## Current scope
+## Useful commands
 
-This version is optimized for a private personal library. It does not yet include multi-user accounts, offline synchronization, full-text-search virtual tables, automatic Kindle device discovery, or permanent storage of source files. Those can be added later without changing the core import identity model.
+```bash
+npm run dev              # Next.js development server with local D1 bindings
+npm run typecheck        # TypeScript validation
+npm run lint             # ESLint
+npm run preview          # production build in workerd
+npm run deploy           # deploy to Cloudflare Workers
+npm run cf-typegen       # regenerate Cloudflare binding types
+```
+
+## Product design
+
+The interface is organized around the repeated reading workflow rather than around database records:
+
+- the left rail provides stable views for all clippings, favorites, review conflicts, archive, books, and tags;
+- the central column is optimized for scanning passages and personal annotations;
+- the detail panel keeps editing and source metadata available without losing the current list position;
+- mobile layouts turn the detail panel into a focused full-screen editor;
+- import results explicitly report additions, duplicates, conflicts, and parsing issues.
+
+The visual system uses a warm neutral reading surface, restrained semantic accents, generous line height, and high-contrast text. This is intentionally closer to a reading notebook than an administration dashboard.

@@ -11,12 +11,14 @@
 # testing
 /coverage
 
-# next.js static build
+# next.js
 /.next/
 /out/
 
-# Cloudflare local state and secrets
+# Cloudflare / OpenNext
+/.open-next/
 /.wrangler/
+cloudflare-env.d.ts
 .dev.vars
 
 # production
@@ -34,6 +36,7 @@ yarn-error.log*
 
 # environment files
 .env*
+!.env.example
 
 # vercel
 .vercel

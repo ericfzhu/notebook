@@ -1,45 +1,97 @@
-import type {
-  ClippingKind,
-  KindleParseError,
-  KindleParseResult,
-  ParsedClipping,
-} from "../notebook";
-import {
-  createBookIdentity,
-  createClippingIdentity,
-  normalizeClippingText,
-} from "./identity";
+export type ClippingKind = "highlight" | "note" | "bookmark" | "unknown";
 
-const CLIPPING_SEPARATOR = /^={10}\s*$/m;
+export interface ParsedClipping {
+  id: string;
+  bookId: string;
+  bookKey: string;
+  sourceTitle: string;
+  sourceAuthor: string;
+  kind: ClippingKind;
+  sourceText: string;
+  pageStart: number | null;
+  pageEnd: number | null;
+  locationStart: number | null;
+  locationEnd: number | null;
+  sourceAddedAt: string | null;
+  sourceAddedAtLabel: string | null;
+  rawMetadata: string;
+  sourceAnchor: string;
+  fingerprint: string;
+}
 
-function parseHeading(heading: string): { title: string; author: string } {
-  const match = heading.match(/^(.*)\s+\(([^()]*)\)\s*$/);
+export interface ParseIssue {
+  section: number;
+  message: string;
+  preview: string;
+}
 
-  if (!match) {
-    return {
-      title: heading.trim(),
-      author: "",
-    };
+export interface ParseResult {
+  clippings: ParsedClipping[];
+  issues: ParseIssue[];
+}
+
+interface RawClipping {
+  sourceTitle: string;
+  sourceAuthor: string;
+  kind: ClippingKind;
+  sourceText: string;
+  pageStart: number | null;
+  pageEnd: number | null;
+  locationStart: number | null;
+  locationEnd: number | null;
+  sourceAddedAt: string | null;
+  sourceAddedAtLabel: string | null;
+  rawMetadata: string;
+}
+
+const SECTION_SEPARATOR = /^\s*={10}\s*$/m;
+
+function normalizeLineEndings(value: string): string {
+  return value.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+}
+
+export function normalizeForIdentity(value: string): string {
+  return value
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase("en");
+}
+
+async function sha256(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+function parseTitleAndAuthor(line: string): {
+  title: string;
+  author: string;
+} {
+  const trimmed = line.trim();
+  const authorStart = trimmed.lastIndexOf(" (");
+
+  if (authorStart > 0 && trimmed.endsWith(")")) {
+    const title = trimmed.slice(0, authorStart).trim();
+    const author = trimmed.slice(authorStart + 2, -1).trim();
+
+    if (title) {
+      return { title, author };
+    }
   }
 
-  return {
-    title: match[1].trim(),
-    author: match[2].trim(),
-  };
+  return { title: trimmed, author: "" };
 }
 
 function parseKind(metadata: string): ClippingKind {
-  if (/\byour\s+highlight\b/i.test(metadata)) {
-    return "highlight";
-  }
+  const normalized = metadata.toLocaleLowerCase("en");
 
-  if (/\byour\s+note\b/i.test(metadata)) {
-    return "note";
-  }
-
-  if (/\byour\s+bookmark\b/i.test(metadata)) {
-    return "bookmark";
-  }
+  if (normalized.includes("highlight")) return "highlight";
+  if (normalized.includes("bookmark")) return "bookmark";
+  if (normalized.includes("note")) return "note";
 
   return "unknown";
 }
@@ -49,182 +101,167 @@ function parseRange(
   pattern: RegExp,
 ): { start: number | null; end: number | null } {
   const match = metadata.match(pattern);
-
-  if (!match) {
-    return { start: null, end: null };
-  }
+  if (!match) return { start: null, end: null };
 
   const start = Number.parseInt(match[1], 10);
-  const parsedEnd = match[2] ? Number.parseInt(match[2], 10) : start;
+  const end = match[2] ? Number.parseInt(match[2], 10) : start;
 
   return {
     start: Number.isFinite(start) ? start : null,
-    end: Number.isFinite(parsedEnd) ? parsedEnd : null,
+    end: Number.isFinite(end) ? end : null,
   };
 }
 
-function parseAddedAt(metadata: string): string | null {
-  const match = metadata.match(/\bAdded on\s+(.+)$/i);
+function parseAddedAt(metadata: string): {
+  iso: string | null;
+  label: string | null;
+} {
+  const segment = metadata
+    .split("|")
+    .map((part) => part.trim())
+    .find((part) => /^added on\s+/i.test(part));
 
-  if (!match) {
-    return null;
-  }
+  if (!segment) return { iso: null, label: null };
 
-  const timestamp = Date.parse(match[1].trim());
-  return Number.isNaN(timestamp) ? null : new Date(timestamp).toISOString();
+  const label = segment.replace(/^added on\s+/i, "").trim();
+  if (!label) return { iso: null, label: null };
+
+  const parsed = Date.parse(label);
+  return {
+    iso: Number.isNaN(parsed) ? null : new Date(parsed).toISOString(),
+    label,
+  };
 }
 
-function trimBlankLines(lines: string[]): string[] {
+function stripOuterBlankLines(lines: string[]): string[] {
   let start = 0;
   let end = lines.length;
 
-  while (start < end && lines[start].trim() === "") {
-    start += 1;
-  }
-
-  while (end > start && lines[end - 1].trim() === "") {
-    end -= 1;
-  }
+  while (start < end && lines[start].trim() === "") start += 1;
+  while (end > start && lines[end - 1].trim() === "") end -= 1;
 
   return lines.slice(start, end);
 }
 
-function parseSection(
-  section: string,
-  sectionNumber: number,
-): { clipping: ParsedClipping | null; error: KindleParseError | null } {
-  const normalizedSection = section.replace(/\r\n?/g, "\n").trim();
+function parseSection(section: string): RawClipping | null {
+  const lines = normalizeLineEndings(section).split("\n");
+  const firstContentLine = lines.findIndex((line) => line.trim().length > 0);
 
-  if (!normalizedSection) {
-    return { clipping: null, error: null };
-  }
-
-  const lines = normalizedSection.split("\n");
-  const heading = lines[0]?.trim() ?? "";
-
-  if (!heading) {
-    return {
-      clipping: null,
-      error: {
-        section: sectionNumber,
-        heading: null,
-        reason: "The clipping has no book title.",
-      },
-    };
-  }
+  if (firstContentLine === -1) return null;
 
   const metadataIndex = lines.findIndex(
-    (line, index) => index > 0 && line.trim().startsWith("-"),
+    (line, index) => index > firstContentLine && /^\s*-/.test(line),
   );
 
   if (metadataIndex === -1) {
-    return {
-      clipping: null,
-      error: {
-        section: sectionNumber,
-        heading,
-        reason: "The clipping metadata line could not be found.",
-      },
-    };
+    throw new Error("The clipping metadata line is missing.");
   }
 
-  const metadata = lines[metadataIndex].trim();
-  const { title, author } = parseHeading(heading);
-  const kind = parseKind(metadata);
-  const page = parseRange(
-    metadata,
-    /\bpage\s+(\d+)(?:\s*[-–]\s*(\d+))?/i,
-  );
+  const { title, author } = parseTitleAndAuthor(lines[firstContentLine]);
+  if (!title) {
+    throw new Error("The book title is missing.");
+  }
+
+  const rawMetadata = lines[metadataIndex].replace(/^\s*-\s*/, "").trim();
+  const kind = parseKind(rawMetadata);
+  const page = parseRange(rawMetadata, /\bpages?\s+(\d+)(?:\s*[-–]\s*(\d+))?/i);
   const location = parseRange(
-    metadata,
-    /\bLocation\s+(\d+)(?:\s*[-–]\s*(\d+))?/i,
+    rawMetadata,
+    /\blocation\s+(\d+)(?:\s*[-–]\s*(\d+))?/i,
   );
-  const sourceText = normalizeClippingText(
-    trimBlankLines(lines.slice(metadataIndex + 1)).join("\n"),
-  );
+  const addedAt = parseAddedAt(rawMetadata);
+  const sourceText = stripOuterBlankLines(lines.slice(metadataIndex + 1))
+    .join("\n")
+    .trim();
 
-  if (!sourceText && kind !== "bookmark") {
-    return {
-      clipping: null,
-      error: {
-        section: sectionNumber,
-        heading,
-        reason: "The clipping has no text.",
-      },
-    };
+  if ((kind === "highlight" || kind === "note") && !sourceText) {
+    throw new Error("The clipping text is empty.");
   }
 
-  const bookIdentity = createBookIdentity(title, author);
-  const clippingIdentity = createClippingIdentity({
-    bookSourceKey: bookIdentity.sourceKey,
+  return {
+    sourceTitle: title,
+    sourceAuthor: author,
     kind,
     sourceText,
     pageStart: page.start,
     pageEnd: page.end,
     locationStart: location.start,
     locationEnd: location.end,
-  });
-
-  return {
-    clipping: {
-      id: clippingIdentity.id,
-      bookId: bookIdentity.id,
-      bookSourceKey: bookIdentity.sourceKey,
-      fingerprint: clippingIdentity.fingerprint,
-      sourceTitle: title,
-      sourceAuthor: author,
-      kind,
-      sourceText,
-      pageStart: page.start,
-      pageEnd: page.end,
-      locationStart: location.start,
-      locationEnd: location.end,
-      sourceAddedAt: parseAddedAt(metadata),
-      rawMetadata: metadata,
-    },
-    error: null,
+    sourceAddedAt: addedAt.iso,
+    sourceAddedAtLabel: addedAt.label,
+    rawMetadata,
   };
 }
 
-export function parseKindleClippings(content: string): KindleParseResult {
-  const sections = content.replace(/^\uFEFF/, "").split(CLIPPING_SEPARATOR);
-  const errors: KindleParseError[] = [];
-  const uniqueClippings = new Map<string, ParsedClipping>();
-  let duplicateCount = 0;
-  let nonEmptySectionCount = 0;
+async function addIdentity(
+  raw: RawClipping,
+  bookKeyCache: Map<string, Promise<string>>,
+): Promise<ParsedClipping> {
+  const normalizedTitle = normalizeForIdentity(raw.sourceTitle);
+  const normalizedAuthor = normalizeForIdentity(raw.sourceAuthor);
+  const normalizedText = normalizeForIdentity(raw.sourceText);
+  const bookIdentity = `${normalizedTitle}\u0000${normalizedAuthor}`;
+  const cachedBookKey = bookKeyCache.get(bookIdentity);
+  const bookKeyPromise = cachedBookKey ?? sha256(bookIdentity);
+  if (!cachedBookKey) bookKeyCache.set(bookIdentity, bookKeyPromise);
+  const bookKey = await bookKeyPromise;
 
-  sections.forEach((section, index) => {
-    if (!section.trim()) {
-      return;
-    }
+  const sourcePosition = raw.locationStart !== null
+    ? `location:${raw.locationStart}-${raw.locationEnd ?? raw.locationStart}`
+    : raw.pageStart !== null
+      ? `page:${raw.pageStart}-${raw.pageEnd ?? raw.pageStart}`
+      : `text:${normalizedText}`;
 
-    nonEmptySectionCount += 1;
-    const result = parseSection(section, index + 1);
-
-    if (result.error) {
-      errors.push(result.error);
-      return;
-    }
-
-    if (!result.clipping) {
-      return;
-    }
-
-    if (uniqueClippings.has(result.clipping.fingerprint)) {
-      duplicateCount += 1;
-      return;
-    }
-
-    uniqueClippings.set(result.clipping.fingerprint, result.clipping);
-  });
-
-  const clippings = Array.from(uniqueClippings.values());
+  const sourceAnchor = await sha256(
+    `${bookKey}\u0000${raw.kind}\u0000${sourcePosition}`,
+  );
+  const fingerprint = await sha256(
+    [
+      sourceAnchor,
+      normalizedText,
+      normalizeForIdentity(raw.sourceAddedAtLabel ?? ""),
+    ].join("\u0000"),
+  );
 
   return {
-    clippings,
-    errors,
-    sectionCount: nonEmptySectionCount,
-    duplicateCount,
-    bookCount: new Set(clippings.map((clipping) => clipping.bookId)).size,
+    ...raw,
+    id: `clip_${fingerprint.slice(0, 32)}`,
+    bookId: `book_${bookKey.slice(0, 24)}`,
+    bookKey,
+    sourceAnchor,
+    fingerprint,
   };
+}
+
+export async function parseKindleClippings(content: string): Promise<ParseResult> {
+  const normalized = normalizeLineEndings(content);
+  const sections = normalized.split(SECTION_SEPARATOR);
+  const rawClippings: RawClipping[] = [];
+  const issues: ParseIssue[] = [];
+
+  sections.forEach((section, index) => {
+    if (!section.trim()) return;
+
+    try {
+      const parsed = parseSection(section);
+      if (parsed) rawClippings.push(parsed);
+    } catch (error) {
+      issues.push({
+        section: index + 1,
+        message: error instanceof Error ? error.message : "Unable to parse clipping.",
+        preview: section.trim().slice(0, 160),
+      });
+    }
+  });
+
+  const bookKeyCache = new Map<string, Promise<string>>();
+  const clippings = await Promise.all(
+    rawClippings.map((raw) => addIdentity(raw, bookKeyCache)),
+  );
+
+  return { clippings, issues };
+}
+
+export async function hashFile(content: string): Promise<string> {
+  return sha256(normalizeLineEndings(content));
 }
